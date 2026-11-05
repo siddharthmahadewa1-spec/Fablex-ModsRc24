@@ -1,0 +1,58 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zip se project kholo
+        run: |
+          mkdir -p project
+          if [ -f fablex-mods-rc24.zip ]; then unzip -o fablex-mods-rc24.zip -d project; else echo "fablex-mods-rc24.zip repo root mein nahi mili"; exit 1; fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install
+        working-directory: project
+        run: npm install
+      - name: Android project banao
+        working-directory: project
+        run: |
+          npx cap add android
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32"/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/><application android:largeHeap="true" android:requestLegacyExternalStorage="true"|' $M
+          npx cap sync android
+      - name: Allow the opening sound to play without a tap
+        working-directory: project
+        run: |
+          F=$(find android -name MainActivity.java | head -1)
+          cat > "$F" <<'JAVA'
+          package com.siddharth.fablexmods;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              super.onCreate(savedInstanceState);
+              getBridge().getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
+            }
+          }
+          JAVA
+      - name: APK build
+        working-directory: project/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FABLEX-MODS-RC24-APK
+          path: project/android/app/build/outputs/apk/debug/*.apk
