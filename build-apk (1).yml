@@ -1,0 +1,145 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Unzip the newest project zip
+        run: |
+          mkdir -p project
+          BEST=""; BT=0
+          for f in fablex-mods-rc24*.zip; do
+            [ -f "$f" ] || continue
+            T=$(git log -1 --format=%ct -- "$f")
+            if [ "${T:-0}" -ge "$BT" ]; then BT="${T:-0}"; BEST="$f"; fi
+          done
+          if [ -z "$BEST" ]; then echo "No fablex-mods-rc24 zip found in the repo root"; exit 1; fi
+          echo "Using: $BEST"
+          unzip -o "$BEST" -d project
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install
+        working-directory: project
+        run: npm install
+      - name: Android project banao
+        working-directory: project
+        run: |
+          npx cap add android
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32"/><uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/><application android:largeHeap="true" android:requestLegacyExternalStorage="true"|' $M
+          npx cap sync android
+      - name: Transparent system bars (theme)
+        working-directory: project
+        run: |
+          python3 - <<'PY'
+          import re, glob
+          for f in glob.glob('android/app/src/main/res/values/styles.xml'):
+              s = open(f).read()
+              items = ('<item name="android:statusBarColor">@android:color/transparent</item>'
+                       '<item name="android:navigationBarColor">@android:color/transparent</item>'
+                       '<item name="android:windowDrawsSystemBarBackgrounds">true</item>'
+                       '<item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>')
+              n = re.sub(r'(<style name="AppTheme\.NoActionBar"[^>]*>)', r'\1' + items, s, count=1)
+              open(f, 'w').write(n)
+              print('styles patched' if n != s else 'styles: pattern not found, skipped')
+          PY
+      - name: Full screen and sound settings
+        working-directory: project
+        run: |
+          F=$(find android -name MainActivity.java | head -1)
+          cat > "$F" <<'JAVA'
+          package com.siddharth.fablexmods;
+
+          import android.graphics.Color;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebView;
+          import androidx.core.graphics.Insets;
+          import androidx.core.view.ViewCompat;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            private volatile int insTop = 0;
+            private volatile int insBottom = 0;
+
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              super.onCreate(savedInstanceState);
+              WebView wv = getBridge().getWebView();
+              wv.getSettings().setMediaPlaybackRequiresUserGesture(false);
+
+              Window w = getWindow();
+              WindowCompat.setDecorFitsSystemWindows(w, false);
+              w.setStatusBarColor(Color.TRANSPARENT);
+              w.setNavigationBarColor(Color.TRANSPARENT);
+              if (Build.VERSION.SDK_INT >= 29) {
+                w.setNavigationBarContrastEnforced(false);
+                w.setStatusBarContrastEnforced(false);
+              }
+              if (Build.VERSION.SDK_INT >= 28) {
+                WindowManager.LayoutParams lp = w.getAttributes();
+                lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                w.setAttributes(lp);
+              }
+              WindowInsetsControllerCompat c = WindowCompat.getInsetsController(w, w.getDecorView());
+              c.setAppearanceLightStatusBars(false);
+              c.setAppearanceLightNavigationBars(false);
+
+              final float d = getResources().getDisplayMetrics().density;
+              wv.addJavascriptInterface(new Object() {
+                @JavascriptInterface public int top() { return insTop; }
+                @JavascriptInterface public int bottom() { return insBottom; }
+              }, "FXInsets");
+              View root = findViewById(android.R.id.content);
+              ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
+                Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+                insTop = Math.round(bars.top / d);
+                insBottom = Math.round(bars.bottom / d);
+                return insets;
+              });
+              ViewCompat.requestApplyInsets(root);
+            }
+          }
+          JAVA
+      - name: App icon
+        working-directory: project
+        run: |
+          R=android/app/src/main/res
+          rm -rf $R/mipmap-anydpi-v26
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            rm -f $R/mipmap-$d/ic_launcher*
+            cp icons/ic_launcher_$d.png $R/mipmap-$d/ic_launcher.png
+            cp icons/ic_launcher_round_$d.png $R/mipmap-$d/ic_launcher_round.png
+          done
+      - name: Fixed signing key (so new APKs update over old ones)
+        working-directory: project
+        run: |
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
+      - name: APK build
+        working-directory: project/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FABLEX-MODS-RC24-APK
+          path: project/android/app/build/outputs/apk/debug/*.apk
